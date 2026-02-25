@@ -7,35 +7,17 @@ use soroban_sdk::{
     Address, Env, String, Symbol, TryFromVal,
 };
 
-fn set_time(env: &Env, timestamp: u64) {
-    let proto = env.ledger().protocol_version();
+use testutils::{set_ledger_time, setup_test_env};
 
-    env.ledger().set(LedgerInfo {
-        protocol_version: proto,
-        sequence_number: 1,
-        timestamp,
-        network_id: [0; 32],
-        base_reserve: 10,
-        min_temp_entry_ttl: 1,
-        min_persistent_entry_ttl: 1,
-        max_entry_ttl: 100000,
-    });
-}
+// Removed local set_time in favor of testutils::set_ledger_time
 
 #[test]
-fn test_create_goal_unique_ids() {
-    let env = Env::default();
-    let contract_id = env.register_contract(None, SavingsGoalContract);
-    let client = SavingsGoalContractClient::new(&env, &contract_id);
-    let user = Address::generate(&env);
-
+fn test_create_goal_unique_ids_succeeds() {
+    setup_test_env!(env, SavingsGoalContract, client, user);
     client.init();
 
     let name1 = String::from_str(&env, "Goal 1");
     let name2 = String::from_str(&env, "Goal 2");
-
-    // Tell the environment to auto-approve the 'user' signature
-    env.mock_all_auths();
 
     let id1 = client.create_goal(&user, &name1, &1000, &1735689600);
     let id2 = client.create_goal(&user, &name2, &2000, &1735689600);
@@ -351,14 +333,10 @@ fn test_exact_goal_completion() {
 }
 
 #[test]
-fn test_set_time_lock() {
-    let env = Env::default();
-    let contract_id = env.register_contract(None, SavingsGoalContract);
-    let client = SavingsGoalContractClient::new(&env, &contract_id);
-    let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
-
-    env.mock_all_auths();
-    set_time(&env, 1000);
+fn test_set_time_lock_succeeds() {
+    setup_test_env!(env, SavingsGoalContract, client, owner);
+    client.init();
+    set_ledger_time(&env, 1, 1000);
 
     let goal_id = client.create_goal(&owner, &String::from_str(&env, "Education"), &10000, &5000);
 
@@ -376,7 +354,7 @@ fn test_withdraw_time_locked_goal_before_unlock() {
     let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
 
     env.mock_all_auths();
-    set_time(&env, 1000);
+    set_ledger_time(&env, 1, 1000);
 
     let goal_id = client.create_goal(&owner, &String::from_str(&env, "Education"), &10000, &5000);
 
@@ -396,7 +374,7 @@ fn test_withdraw_time_locked_goal_after_unlock() {
     let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
 
     env.mock_all_auths();
-    set_time(&env, 1000);
+    set_ledger_time(&env, 1, 1000);
 
     let goal_id = client.create_goal(&owner, &String::from_str(&env, "Education"), &10000, &5000);
 
@@ -404,7 +382,7 @@ fn test_withdraw_time_locked_goal_after_unlock() {
     client.unlock_goal(&owner, &goal_id);
     client.set_time_lock(&owner, &goal_id, &3000);
 
-    set_time(&env, 3500);
+    set_ledger_time(&env, 1, 3500);
     let new_amount = client.withdraw_from_goal(&owner, &goal_id, &1000);
     assert_eq!(new_amount, 4000);
 }
@@ -417,7 +395,7 @@ fn test_create_savings_schedule() {
     let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
 
     env.mock_all_auths();
-    set_time(&env, 1000);
+    set_ledger_time(&env, 1, 1000);
 
     let goal_id = client.create_goal(&owner, &String::from_str(&env, "Education"), &10000, &5000);
 
@@ -440,7 +418,7 @@ fn test_modify_savings_schedule() {
     let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
 
     env.mock_all_auths();
-    set_time(&env, 1000);
+    set_ledger_time(&env, 1, 1000);
 
     let goal_id = client.create_goal(&owner, &String::from_str(&env, "Education"), &10000, &5000);
 
@@ -461,7 +439,7 @@ fn test_cancel_savings_schedule() {
     let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
 
     env.mock_all_auths();
-    set_time(&env, 1000);
+    set_ledger_time(&env, 1, 1000);
 
     let goal_id = client.create_goal(&owner, &String::from_str(&env, "Education"), &10000, &5000);
 
@@ -480,13 +458,13 @@ fn test_execute_due_savings_schedules() {
     let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
 
     env.mock_all_auths();
-    set_time(&env, 1000);
+    set_ledger_time(&env, 1, 1000);
 
     let goal_id = client.create_goal(&owner, &String::from_str(&env, "Education"), &10000, &5000);
 
     let schedule_id = client.create_savings_schedule(&owner, &goal_id, &500, &3000, &0);
 
-    set_time(&env, 3500);
+    set_ledger_time(&env, 1, 3500);
     let executed = client.execute_due_savings_schedules();
 
     assert_eq!(executed.len(), 1);
@@ -504,13 +482,13 @@ fn test_execute_recurring_savings_schedule() {
     let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
 
     env.mock_all_auths();
-    set_time(&env, 1000);
+    set_ledger_time(&env, 1, 1000);
 
     let goal_id = client.create_goal(&owner, &String::from_str(&env, "Education"), &10000, &5000);
 
     let schedule_id = client.create_savings_schedule(&owner, &goal_id, &500, &3000, &86400);
 
-    set_time(&env, 3500);
+    set_ledger_time(&env, 1, 3500);
     client.execute_due_savings_schedules();
 
     let schedule = client.get_savings_schedule(&schedule_id).unwrap();
@@ -529,13 +507,13 @@ fn test_execute_missed_savings_schedules() {
     let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
 
     env.mock_all_auths();
-    set_time(&env, 1000);
+    set_ledger_time(&env, 1, 1000);
 
     let goal_id = client.create_goal(&owner, &String::from_str(&env, "Education"), &10000, &5000);
 
     let schedule_id = client.create_savings_schedule(&owner, &goal_id, &500, &3000, &86400);
 
-    set_time(&env, 3000 + 86400 * 3 + 100);
+    set_ledger_time(&env, 1, 3000 + 86400 * 3 + 100);
     client.execute_due_savings_schedules();
 
     let schedule = client.get_savings_schedule(&schedule_id).unwrap();
@@ -551,13 +529,13 @@ fn test_savings_schedule_goal_completion() {
     let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
 
     env.mock_all_auths();
-    set_time(&env, 1000);
+    set_ledger_time(&env, 1, 1000);
 
     let goal_id = client.create_goal(&owner, &String::from_str(&env, "Education"), &1000, &5000);
 
     client.create_savings_schedule(&owner, &goal_id, &1000, &3000, &0);
 
-    set_time(&env, 3500);
+    set_ledger_time(&env, 1, 3500);
     client.execute_due_savings_schedules();
 
     let goal = client.get_goal(&goal_id).unwrap();

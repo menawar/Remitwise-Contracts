@@ -1,33 +1,10 @@
-#[cfg(test)]
-mod testsuit {
-    use crate::*;
-    use soroban_sdk::testutils::storage::Instance as _;
-    use soroban_sdk::testutils::{Address as AddressTrait, Ledger, LedgerInfo};
-    use soroban_sdk::Env;
+    use testutils::{set_ledger_time, setup_test_env};
 
-    fn set_time(env: &Env, timestamp: u64) {
-        let proto = env.ledger().protocol_version();
-
-        env.ledger().set(LedgerInfo {
-            protocol_version: proto,
-            sequence_number: 1,
-            timestamp,
-            network_id: [0; 32],
-            base_reserve: 10,
-            min_temp_entry_ttl: 1,
-            min_persistent_entry_ttl: 1,
-            max_entry_ttl: 100000,
-        });
-    }
+    // Removed local set_time in favor of testutils::set_ledger_time
 
     #[test]
-    fn test_create_bill() {
-        let env = Env::default();
-        let contract_id = env.register_contract(None, BillPayments);
-        let client = BillPaymentsClient::new(&env, &contract_id);
-        let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
-
-        env.mock_all_auths();
+    fn test_create_bill_succeeds() {
+        setup_test_env!(env, BillPayments, client, owner);
 
         let bill_id = client.create_bill(
             &owner,
@@ -49,13 +26,8 @@ mod testsuit {
     }
 
     #[test]
-    fn test_create_bill_invalid_amount() {
-        let env = Env::default();
-        let contract_id = env.register_contract(None, BillPayments);
-        let client = BillPaymentsClient::new(&env, &contract_id);
-        let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
-
-        env.mock_all_auths();
+    fn test_create_bill_invalid_amount_fails() {
+        setup_test_env!(env, BillPayments, client, owner);
         let result = client.try_create_bill(
             &owner,
             &String::from_str(&env, "Invalid"),
@@ -291,9 +263,9 @@ mod testsuit {
     }
 
     #[test]
-    fn test_get_overdue_bills() {
+    fn test_get_overdue_bills_succeeds() {
         let env = Env::default();
-        set_time(&env, 2_000_000);
+        set_ledger_time(&env, 1, 2_000_000);
 
         let contract_id = env.register_contract(None, BillPayments);
         let client = BillPaymentsClient::new(&env, &contract_id);
@@ -588,9 +560,9 @@ mod testsuit {
     }
 
     #[test]
-    fn test_pay_overdue_bill() {
+    fn test_pay_overdue_bill_succeeds() {
         let env = Env::default();
-        set_time(&env, 2_000_000); // Set time past due date
+        set_ledger_time(&env, 1, 2_000_000); // Set time past due date
         let contract_id = env.register_contract(None, BillPayments);
         let client = BillPaymentsClient::new(&env, &contract_id);
         let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);

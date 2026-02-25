@@ -6,29 +6,13 @@ use soroban_sdk::{
     Address, Env, IntoVal, Symbol, TryFromVal, Val, Vec,
 };
 
-fn set_time(env: &Env, timestamp: u64) {
-    let proto = env.ledger().protocol_version();
+use testutils::{set_ledger_time, setup_test_env};
 
-    env.ledger().set(LedgerInfo {
-        protocol_version: proto,
-        sequence_number: 1,
-        timestamp,
-        network_id: [0; 32],
-        base_reserve: 10,
-        min_temp_entry_ttl: 1,
-        min_persistent_entry_ttl: 1,
-        max_entry_ttl: 100000,
-    });
-}
+// Removed local set_time in favor of testutils::set_ledger_time
 
 #[test]
-fn test_initialize_split() {
-    let env = Env::default();
-    let contract_id = env.register_contract(None, RemittanceSplit);
-    let client = RemittanceSplitClient::new(&env, &contract_id);
-    let owner = Address::generate(&env);
-
-    env.mock_all_auths();
+fn test_initialize_split_succeeds() {
+    setup_test_env!(env, RemittanceSplit, client, owner);
 
     let success = client.initialize_split(
         &owner, &0,  // nonce
@@ -297,14 +281,9 @@ fn test_calculate_complex_rounding() {
 }
 
 #[test]
-fn test_create_remittance_schedule() {
-    let env = Env::default();
-    let contract_id = env.register_contract(None, RemittanceSplit);
-    let client = RemittanceSplitClient::new(&env, &contract_id);
-    let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
-
-    env.mock_all_auths();
-    set_time(&env, 1000);
+fn test_create_remittance_schedule_succeeds() {
+    setup_test_env!(env, RemittanceSplit, client, owner);
+    set_ledger_time(&env, 1000);
 
     client.initialize_split(&owner, &0, &50, &30, &15, &5);
 

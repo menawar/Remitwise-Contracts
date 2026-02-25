@@ -327,7 +327,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn snapshot_checksum_roundtrip() {
+    fn test_snapshot_checksum_roundtrip_succeeds() {
         let payload = SnapshotPayload::RemittanceSplit(RemittanceSplitExport {
             owner: "GABC".into(),
             spending_percent: 50,
@@ -342,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn export_import_json() {
+    fn test_export_import_json_succeeds() {
         let payload = SnapshotPayload::RemittanceSplit(RemittanceSplitExport {
             owner: "GXYZ".into(),
             spending_percent: 40,
@@ -358,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn export_import_binary() {
+    fn test_export_import_binary_succeeds() {
         let payload = SnapshotPayload::RemittanceSplit(RemittanceSplitExport {
             owner: "GBIN".into(),
             spending_percent: 25,
@@ -373,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn checksum_mismatch_fails_import() {
+    fn test_checksum_mismatch_import_fails() {
         let payload = SnapshotPayload::RemittanceSplit(RemittanceSplitExport {
             owner: "GX".into(),
             spending_percent: 100,
@@ -388,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn version_compatibility() {
+    fn test_check_version_compatibility_succeeds() {
         assert!(check_version_compatibility(1).is_ok());
         assert!(check_version_compatibility(SCHEMA_VERSION).is_ok());
         assert!(check_version_compatibility(0).is_err());
@@ -396,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn csv_export_import_goals() {
+    fn test_csv_export_import_goals_succeeds() {
         let export = SavingsGoalsExport {
             next_id: 2,
             goals: vec![SavingsGoalExport {
@@ -417,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_event_serialization() {
+    fn test_migration_event_serialization_succeeds() {
         let event = MigrationEvent::V1(MigrationEventV1 {
             contract_id: "CABCD".into(),
             migration_type: "export".into(),

@@ -15,6 +15,7 @@ members = [
     "reporting",
     "orchestrator",
     "scenarios",
+    "testutils",
 ]
 resolver = "2"
 
