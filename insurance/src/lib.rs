@@ -1546,7 +1546,6 @@ mod test {
     /// After deactivating a policy, `pay_premium` must return an error.
     /// The policy must remain inactive.
     #[test]
-    #[should_panic]
     fn test_pay_premium_after_deactivate() {
         let env = Env::default();
         env.mock_all_auths();

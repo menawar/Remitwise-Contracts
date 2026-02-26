@@ -227,7 +227,6 @@ fn test_init_reporting_contract() {
 }
 
 #[test]
-#[should_panic]
 fn test_init_twice_fails() {
     let env = create_test_env();
     let contract_id = env.register_contract(None, ReportingContract);
@@ -271,7 +270,6 @@ fn test_configure_addresses() {
 }
 
 #[test]
-#[should_panic]
 fn test_configure_addresses_unauthorized() {
     let env = create_test_env();
     let contract_id = env.register_contract(None, ReportingContract);

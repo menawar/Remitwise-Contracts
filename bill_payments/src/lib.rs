@@ -1267,11 +1267,7 @@ impl BillPayments {
             .get(&STORAGE_UNPAID_TOTALS)
             .unwrap_or_else(|| Map::new(env));
         let current = totals.get(owner.clone()).unwrap_or(0);
-        let next = if delta >= 0 {
-            current.saturating_add(delta)
-        } else {
-            current.saturating_sub(delta.saturating_abs())
-        };
+        let next = current.checked_add(delta).expect("overflow");
         totals.set(owner.clone(), next);
         env.storage()
             .instance()
