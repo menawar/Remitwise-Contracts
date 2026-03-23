@@ -259,6 +259,7 @@ impl Insurance {
     }
     pub fn pause_function(env: Env, caller: Address, func: Symbol) -> Result<(), InsuranceError> {
         caller.require_auth();
+        let admin = Self::get_pause_admin(&env).ok_or(InsuranceError::Unauthorized)?;
         if admin != caller {
             return Err(InsuranceError::Unauthorized);
         }
@@ -275,6 +276,7 @@ impl Insurance {
     }
     pub fn unpause_function(env: Env, caller: Address, func: Symbol) -> Result<(), InsuranceError> {
         caller.require_auth();
+        let admin = Self::get_pause_admin(&env).ok_or(InsuranceError::Unauthorized)?;
         if admin != caller {
             return Err(InsuranceError::Unauthorized);
         }
@@ -524,8 +526,6 @@ impl Insurance {
             tags: Vec::new(&env),
         };
 
-        let policy_owner = policy.owner.clone();
-        let policy_external_ref = policy.external_ref.clone();
         policies.set(next_id, policy);
         env.storage()
             .instance()
@@ -606,7 +606,6 @@ impl Insurance {
         };
         env.events().publish((PREMIUM_PAID,), event);
 
-        policies.set(policy_id, policy);
         policies.set(policy_id, policy.clone());
         env.storage()
             .instance()
@@ -797,7 +796,6 @@ impl Insurance {
             .get(&symbol_short!("POLICIES"))
             .unwrap_or_else(|| Map::new(&env));
 
-        let mut policy = policies.get(policy_id).unwrap_or_else(|| panic!("Policy not found"));
         let mut policy = policies
             .get(policy_id)
             .ok_or(InsuranceError::PolicyNotFound)?;
@@ -809,7 +807,6 @@ impl Insurance {
         let was_active = policy.active;
         policy.active = false;
         let policy_external_ref = policy.external_ref.clone();
-        policies.set(policy_id, policy);
         let premium_amount = policy.monthly_premium;
         policies.set(policy_id, policy.clone());
         env.storage()
