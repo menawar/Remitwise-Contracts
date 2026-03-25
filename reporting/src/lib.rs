@@ -787,6 +787,8 @@ impl ReportingContract {
             (user, period_key),
         );
 
+        Self::update_storage_stats(&env);
+
         true
     }
 
@@ -975,10 +977,15 @@ impl ReportingContract {
         deleted_count
     }
 
-    /// Get storage usage statistics
+    /// Returns aggregate counts of active and archived reports for observability.
+    ///
+    /// This is intentionally callable without authentication: it exposes only
+    /// non-sensitive counters (not report contents or user-identifying detail).
+    /// Callers must not treat these values as authorization signals.
     ///
     /// # Returns
-    /// StorageStats struct with current storage metrics
+    /// [`StorageStats`] with `active_reports`, `archived_reports`, and `last_updated`
+    /// (ledger timestamp when stats were last recomputed).
     pub fn get_storage_stats(env: Env) -> StorageStats {
         env.storage()
             .instance()

@@ -164,7 +164,7 @@ mod bill_payments {
 }
 
 mod insurance {
-    use crate::{InsurancePolicy, InsuranceTrait, PolicyPage};
+    use crate::{InsurancePolicy, InsuranceTrait};
     use soroban_sdk::{contract, contractimpl, Address, Env, String as SorobanString, Vec};
 
     #[contract]
@@ -204,7 +204,11 @@ mod insurance {
     }
 }
 
-// create_test_env removed in favor of testutils and Env::default()
+fn create_test_env() -> Env {
+    let env = Env::default();
+    env.mock_all_auths();
+    env
+}
 
 #[test]
 fn test_init_reporting_contract_succeeds() {
@@ -848,12 +852,112 @@ fn test_storage_stats() {
     let report = client.get_financial_health_report(&user, &10000, &1704067200, &1706745600);
     client.store_report(&user, &report, &202401);
 
+    let stats = client.get_storage_stats();
+    assert_eq!(stats.active_reports, 1);
+    assert_eq!(stats.archived_reports, 0);
+
     // Archive and check stats
     client.archive_old_reports(&admin, &2000000000);
 
     let stats = client.get_storage_stats();
     assert_eq!(stats.active_reports, 0);
     assert_eq!(stats.archived_reports, 1);
+}
+
+/// Regression: `get_storage_stats` must stay aligned with real maps across store → archive → cleanup
+/// and after high-volume inserts (see issue #316).
+#[test]
+fn test_storage_stats_regression_across_archive_and_cleanup_cycles() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin);
+
+    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
+    let bill_payments_id = env.register_contract(None, bill_payments::BillPayments);
+    let insurance_id = env.register_contract(None, insurance::Insurance);
+    let family_wallet = Address::generate(&env);
+
+    client.configure_addresses(
+        &admin,
+        &remittance_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet,
+    );
+
+    // Zero-state snapshot (no reports stored yet; stats key may be absent)
+    set_ledger_time(&env, 1, 1_704_067_200);
+    let zero = client.get_storage_stats();
+    assert_eq!(zero.active_reports, 0);
+    assert_eq!(zero.archived_reports, 0);
+    assert_eq!(zero.last_updated, 0);
+
+    // High-volume: many active rows, distinct generated_at via ledger time steps
+    const TOTAL: u64 = 16;
+    let base_ts = 1_000_000u64;
+    for i in 0..TOTAL {
+        set_ledger_time(&env, 10 + i as u32, base_ts + i);
+        let report =
+            client.get_financial_health_report(&user, &10000, &1704067200, &1706745600);
+        client.store_report(&user, &report, &(202_400 + i));
+    }
+
+    let after_bulk = client.get_storage_stats();
+    assert_eq!(after_bulk.active_reports, TOTAL as u32);
+    assert_eq!(after_bulk.archived_reports, 0);
+    assert_eq!(after_bulk.last_updated, base_ts + TOTAL - 1);
+
+    // Partial archive: only reports with generated_at < cutoff move to ARCH_RPT
+    let archive_cutoff = base_ts + 8;
+    set_ledger_time(&env, 500, base_ts + 100);
+    let n_archived = client.archive_old_reports(&admin, &archive_cutoff);
+    assert_eq!(n_archived, 8);
+
+    let after_partial = client.get_storage_stats();
+    assert_eq!(after_partial.active_reports, 8);
+    assert_eq!(after_partial.archived_reports, 8);
+    assert_eq!(after_partial.last_updated, base_ts + 100);
+
+    // Post-cleanup: archives removed; actives unchanged
+    let cleanup_before = base_ts + 200;
+    set_ledger_time(&env, 600, base_ts + 150);
+    let deleted = client.cleanup_old_reports(&admin, &cleanup_before);
+    assert_eq!(deleted, 8);
+
+    let after_cleanup = client.get_storage_stats();
+    assert_eq!(after_cleanup.active_reports, 8);
+    assert_eq!(after_cleanup.archived_reports, 0);
+    assert_eq!(after_cleanup.last_updated, base_ts + 150);
+
+    // Second cycle: new report increments active; full archive then cleanup returns to zero archived
+    set_ledger_time(&env, 700, base_ts + 300);
+    let report =
+        client.get_financial_health_report(&user, &10000, &1704067200, &1706745600);
+    client.store_report(&user, &report, &209_912);
+
+    let after_new_store = client.get_storage_stats();
+    assert_eq!(after_new_store.active_reports, 9);
+    assert_eq!(after_new_store.archived_reports, 0);
+
+    set_ledger_time(&env, 800, base_ts + 400);
+    client.archive_old_reports(&admin, &(base_ts + 500));
+    let after_second_archive = client.get_storage_stats();
+    assert_eq!(after_second_archive.active_reports, 0);
+    assert_eq!(after_second_archive.archived_reports, 9);
+
+    set_ledger_time(&env, 900, base_ts + 500);
+    assert_eq!(client.cleanup_old_reports(&admin, &(base_ts + 600)), 9);
+    let final_stats = client.get_storage_stats();
+    assert_eq!(final_stats.active_reports, 0);
+    assert_eq!(final_stats.archived_reports, 0);
 }
 
 #[test]
