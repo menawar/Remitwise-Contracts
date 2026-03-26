@@ -72,7 +72,6 @@ fn test_configure_multisig() {
 }
 
 #[test]
-#[should_panic(expected = "Only Owner or Admin can configure multi-sig")]
 fn test_configure_multisig_unauthorized() {
     let env = Env::default();
     env.mock_all_auths();
@@ -87,13 +86,14 @@ fn test_configure_multisig_unauthorized() {
     client.init(&owner, &initial_members);
 
     let signers = vec![&env, member1.clone(), member2.clone()];
-    client.configure_multisig(
+    let result = client.try_configure_multisig(
         &member1,
         &TransactionType::LargeWithdrawal,
         &2,
         &signers,
         &1000_0000000,
     );
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
 }
 
 #[test]
@@ -1297,7 +1297,6 @@ fn test_threshold_maximum_valid() {
 }
 
 #[test]
-#[should_panic(expected = "Threshold cannot exceed")]
 fn test_threshold_above_maximum_rejected() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1312,17 +1311,17 @@ fn test_threshold_above_maximum_rejected() {
     client.init(&owner, &initial_members);
 
     let signers = vec![&env, member1.clone(), member2.clone()];
-    client.configure_multisig(
+    let result = client.try_configure_multisig(
         &owner,
         &TransactionType::LargeWithdrawal,
         &101,
         &signers,
         &1000_0000000,
     );
+    assert_eq!(result, Err(Ok(Error::ThresholdAboveMaximum)));
 }
 
 #[test]
-#[should_panic(expected = "Threshold must be at least")]
 fn test_threshold_zero_rejected() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1337,17 +1336,17 @@ fn test_threshold_zero_rejected() {
     client.init(&owner, &initial_members);
 
     let signers = vec![&env, member1.clone(), member2.clone()];
-    client.configure_multisig(
+    let result = client.try_configure_multisig(
         &owner,
         &TransactionType::LargeWithdrawal,
         &0,
         &signers,
         &1000_0000000,
     );
+    assert_eq!(result, Err(Ok(Error::ThresholdBelowMinimum)));
 }
 
 #[test]
-#[should_panic(expected = "Threshold cannot exceed")]
 fn test_threshold_exceeds_signer_count_rejected() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1362,17 +1361,17 @@ fn test_threshold_exceeds_signer_count_rejected() {
     client.init(&owner, &initial_members);
 
     let signers = vec![&env, member1.clone(), member2.clone()];
-    client.configure_multisig(
+    let result = client.try_configure_multisig(
         &owner,
         &TransactionType::LargeWithdrawal,
         &3,
         &signers,
         &1000_0000000,
     );
+    assert_eq!(result, Err(Ok(Error::InvalidThreshold)));
 }
 
 #[test]
-#[should_panic(expected = "Signers list cannot be empty")]
 fn test_empty_signers_list_rejected() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1385,17 +1384,17 @@ fn test_empty_signers_list_rejected() {
     client.init(&owner, &initial_members);
 
     let empty_signers = vec![&env];
-    client.configure_multisig(
+    let result = client.try_configure_multisig(
         &owner,
         &TransactionType::LargeWithdrawal,
         &1,
         &empty_signers,
         &1000_0000000,
     );
+    assert_eq!(result, Err(Ok(Error::SignersListEmpty)));
 }
 
 #[test]
-#[should_panic(expected = "Signer is not a family member")]
 fn test_signer_not_family_member_rejected() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1410,17 +1409,17 @@ fn test_signer_not_family_member_rejected() {
 
     let non_member = Address::generate(&env);
     let signers = vec![&env, member1.clone(), non_member.clone()];
-    client.configure_multisig(
+    let result = client.try_configure_multisig(
         &owner,
         &TransactionType::LargeWithdrawal,
         &2,
         &signers,
         &1000_0000000,
     );
+    assert_eq!(result, Err(Ok(Error::SignerNotMember)));
 }
 
 #[test]
-#[should_panic(expected = "Spending limit must be non-negative")]
 fn test_negative_spending_limit_rejected() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1434,13 +1433,14 @@ fn test_negative_spending_limit_rejected() {
     client.init(&owner, &initial_members);
 
     let signers = vec![&env, member1.clone()];
-    client.configure_multisig(
+    let result = client.try_configure_multisig(
         &owner,
         &TransactionType::LargeWithdrawal,
         &1,
         &signers,
         &(-100),
     );
+    assert_eq!(result, Err(Ok(Error::InvalidSpendingLimit)));
 }
 
 #[test]
@@ -1655,4 +1655,141 @@ fn test_admin_can_configure_multisig() {
         &signers,
         &1000_0000000,
     );
+}
+
+#[test]
+fn test_duplicate_signer_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let member1 = Address::generate(&env);
+    let member2 = Address::generate(&env);
+    let initial_members = vec![&env, member1.clone(), member2.clone()];
+
+    client.init(&owner, &initial_members);
+
+    let signers = vec![&env, member1.clone(), member1.clone()];
+    let result = client.try_configure_multisig(
+        &owner,
+        &TransactionType::LargeWithdrawal,
+        &2,
+        &signers,
+        &1000_0000000,
+    );
+    assert_eq!(result, Err(Ok(Error::DuplicateSigner)));
+}
+
+#[test]
+fn test_duplicate_signer_with_three_members() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let member1 = Address::generate(&env);
+    let member2 = Address::generate(&env);
+    let member3 = Address::generate(&env);
+    let initial_members = vec![&env, member1.clone(), member2.clone(), member3.clone()];
+
+    client.init(&owner, &initial_members);
+
+    let signers = vec![&env, member1.clone(), member2.clone(), member1.clone()];
+    let result = client.try_configure_multisig(
+        &owner,
+        &TransactionType::LargeWithdrawal,
+        &2,
+        &signers,
+        &1000_0000000,
+    );
+    assert_eq!(result, Err(Ok(Error::DuplicateSigner)));
+}
+
+#[test]
+fn test_too_many_signers_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+
+    // Create 101 members (exceeds MAX_SIGNERS = 100)
+    let mut members = Vec::new(&env);
+    let mut signers = Vec::new(&env);
+    for _ in 0..101 {
+        let addr = Address::generate(&env);
+        members.push_back(addr.clone());
+        signers.push_back(addr);
+    }
+
+    client.init(&owner, &members);
+
+    let result = client.try_configure_multisig(
+        &owner,
+        &TransactionType::LargeWithdrawal,
+        &50,
+        &signers,
+        &1000_0000000,
+    );
+    assert_eq!(result, Err(Ok(Error::TooManySigners)));
+}
+
+#[test]
+fn test_threshold_bounds_return_correct_errors() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let member1 = Address::generate(&env);
+    let initial_members = vec![&env, member1.clone()];
+
+    client.init(&owner, &initial_members);
+
+    let signers = vec![&env, member1.clone()];
+
+    // Threshold 0 → ThresholdBelowMinimum
+    let result = client.try_configure_multisig(
+        &owner,
+        &TransactionType::LargeWithdrawal,
+        &0,
+        &signers,
+        &0,
+    );
+    assert_eq!(result, Err(Ok(Error::ThresholdBelowMinimum)));
+
+    // Threshold 101 → ThresholdAboveMaximum
+    let result = client.try_configure_multisig(
+        &owner,
+        &TransactionType::LargeWithdrawal,
+        &101,
+        &signers,
+        &0,
+    );
+    assert_eq!(result, Err(Ok(Error::ThresholdAboveMaximum)));
+
+    // Threshold 2 with 1 signer → InvalidThreshold
+    let result = client.try_configure_multisig(
+        &owner,
+        &TransactionType::LargeWithdrawal,
+        &2,
+        &signers,
+        &0,
+    );
+    assert_eq!(result, Err(Ok(Error::InvalidThreshold)));
+
+    // Threshold 1 with 1 signer → Ok
+    let result = client.try_configure_multisig(
+        &owner,
+        &TransactionType::LargeWithdrawal,
+        &1,
+        &signers,
+        &0,
+    );
+    assert!(result.is_ok());
 }
