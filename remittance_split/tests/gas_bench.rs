@@ -92,8 +92,8 @@ fn bench_create_remittance_schedule() {
         client.create_remittance_schedule(&owner, &amount, &next_due, &interval)
     });
     
-    assert!(result.is_ok());
-    let schedule_id = result.unwrap();
+    
+    let schedule_id = result;
     assert_eq!(schedule_id, 1);
 
     println!(
@@ -243,8 +243,7 @@ fn bench_get_remittance_schedules_with_data() {
         let next_due = env.ledger().timestamp() + 86400 * i;
         let interval = 2_592_000u64;
         
-        let result = client.create_remittance_schedule(&owner1, &amount, &next_due, &interval);
-        assert!(result.is_ok());
+        let _result = client.create_remittance_schedule(&owner1, &amount, &next_due, &interval);
     }
 
     // Create 3 schedules for owner2 (should not be returned for owner1)
@@ -253,8 +252,7 @@ fn bench_get_remittance_schedules_with_data() {
         let next_due = env.ledger().timestamp() + 86400 * i;
         let interval = 604_800u64;
         
-        let result = client.create_remittance_schedule(&owner2, &amount, &next_due, &interval);
-        assert!(result.is_ok());
+        let _result = client.create_remittance_schedule(&owner2, &amount, &next_due, &interval);
     }
 
     let (cpu, mem, schedules) = measure(&env, || {
