@@ -3,7 +3,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token::TokenClient, vec,
-    Address, Env, Map, Symbol, Vec,
+    Address, BytesN, Env, IntoVal, Map, Symbol, Vec,
 };
 
 // Event topics
@@ -160,6 +160,30 @@ pub enum ScheduleEvent {
 const SCHEMA_VERSION: u32 = 1;
 /// Oldest snapshot schema version this contract can import. Enables backward compat.
 const MIN_SUPPORTED_SCHEMA_VERSION: u32 = 1;
+/// Domain-separated payload for split initialization.
+/// Binds technical context (network, contract) with business parameters
+/// to prevent relay/replay attacks across different deployments or networks.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InitializationPayload {
+    /// Domain identifier for functional separation (e.g. symbol_short!("init"))
+    pub domain: Symbol,
+    /// Network ID to prevent replay across different Stellar networks
+    pub network: BytesN<32>,
+    /// Contract address to prevent replay across different contract instances
+    pub contract: Address,
+    /// Owner address who is authorizing the initialization
+    pub owner: Address,
+    /// Per-address nonce for sequential replay protection
+    pub nonce: u64,
+    /// Parameters of the initialization
+    pub usdc_contract: Address,
+    pub spending_percent: u32,
+    pub savings_percent: u32,
+    pub bills_percent: u32,
+    pub insurance_percent: u32,
+}
+
 const MAX_AUDIT_ENTRIES: u32 = 100;
 const CONTRACT_VERSION: u32 = 1;
 
@@ -377,7 +401,20 @@ impl RemittanceSplit {
         bills_percent: u32,
         insurance_percent: u32,
     ) -> Result<bool, RemittanceSplitError> {
-        owner.require_auth();
+        let payload = InitializationPayload {
+            domain: symbol_short!("init"),
+            network: env.ledger().network_id(),
+            contract: env.current_contract_address(),
+            owner: owner.clone(),
+            nonce,
+            usdc_contract: usdc_contract.clone(),
+            spending_percent,
+            savings_percent,
+            bills_percent,
+            insurance_percent,
+        };
+        owner.require_auth_for_args((payload,).into_val(&env));
+
         Self::require_not_paused(&env)?;
         Self::require_nonce(&env, &owner, nonce)?;
 

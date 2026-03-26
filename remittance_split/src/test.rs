@@ -36,6 +36,44 @@ fn make_accounts(env: &Env) -> AccountGroup {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn test_initialize_split_domain_separated_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+
+    // Verify that the authorization includes the full domain-separated payload
+    let auths = env.auths();
+    assert_eq!(auths.len(), 1);
+    
+    // The auths captured by mock_all_auths record what was authorized.
+    // In our case, the contract calls owner.require_auth_for_args(payload).
+    let (address, auth_invocation) = auths.get(0).unwrap();
+    assert_eq!(address, owner);
+    
+    // The top-level invocation from mock_all_auths for require_auth_for_args
+    // will have the authorized arguments.
+    let payload_val = auth_invocation.args.get(0).unwrap();
+    let payload = InitializationPayload::try_from_val(&env, &payload_val).unwrap();
+    
+    assert_eq!(payload.domain, symbol_short!("init"));
+    assert_eq!(payload.network, env.ledger().network_id());
+    assert_eq!(payload.contract, contract_id);
+    assert_eq!(payload.owner, owner);
+    assert_eq!(payload.nonce, 0);
+    assert_eq!(payload.usdc_contract, token_id);
+    assert_eq!(payload.spending_percent, 50);
+    assert_eq!(payload.savings_percent, 30);
+    assert_eq!(payload.bills_percent, 15);
+    assert_eq!(payload.insurance_percent, 5);
+}
+
+#[test]
 fn test_initialize_split_succeeds() {
     let env = Env::default();
     env.mock_all_auths();
