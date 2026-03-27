@@ -628,6 +628,17 @@ soroban contract deploy \
   --network testnet
 ```
 
+## Data Migration
+
+The `data_migration` payload library provides format-agnostic snapshot export/import capabilities across all contracts.
+
+### Import Replay Protection
+
+When importing payloads, the contracts use a `MigrationTracker` to prevent duplicate imports and replay attacks.
+- Payload Identity is cryptographically bound to a `(checksum, version)` tuple.
+- The state tracker persists this tuple alongside the ingestion `timestamp_ms` to outright reject replayed or copied payloads using `MigrationError::DuplicateImport`.
+- Restores are safely guarded against double spending or overriding the active state multiple times.
+
 ## Operational Limits
 
 ID and record-count operating limits (including `u32` overflow analysis and monitoring alerts) are documented in the **Operational Limits and Monitoring** section of [ARCHITECTURE.md](ARCHITECTURE.md).
