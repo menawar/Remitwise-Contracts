@@ -1499,3 +1499,29 @@ By addressing these issues systematically, the Remitwise platform can achieve a 
 - [Smart Contract Security Verification Standard](https://github.com/securing/SCSVS)
 - [OWASP Smart Contract Top 10](https://owasp.org/www-project-smart-contract-top-10/)
 - Remitwise Architecture Documentation (ARCHITECTURE.md)
+
+## Nonce and Replay Protection (Issue #305)
+
+### Threat
+An attacker who captures a valid signed orchestrator command payload can resubmit it to trigger the same operation multiple times (replay attack).
+
+### Mitigation
+All single-operation entry points (`execute_savings_deposit`, `execute_bill_payment`, `execute_insurance_payment`) now require a caller-supplied `nonce: u64` parameter.
+
+The nonce is bound to a composite key of `(caller, command_type, nonce)` stored in persistent contract storage. Once consumed, the key is permanently recorded and any attempt to reuse it returns `OrchestratorError::NonceAlreadyUsed`.
+
+### Security Properties
+- **Caller-scoped**: the same nonce value is valid for different callers.
+- **Command-scoped**: the same nonce value is valid across different command types.
+- **Permanent**: consumed nonces never expire — there is no time window for replay.
+- **Atomic**: nonce consumption happens before any state changes; a failed call does not consume the nonce if it fails before the consume step is reached; if it fails after, the nonce is consumed and the operation must be retried with a fresh nonce.
+
+### Error Codes
+| Code | Name | Description |
+|------|------|-------------|
+| 11 | SelfReferenceNotAllowed | A contract address references the orchestrator itself |
+| 12 | DuplicateContractAddress | Two or more contract addresses are identical |
+| 13 | NonceAlreadyUsed | Nonce has already been consumed for this caller/command pair |
+
+### Test Coverage
+Six dedicated nonce tests cover: replay rejection per command type, nonce isolation per caller, nonce isolation across command types, and sequential unique nonce acceptance.

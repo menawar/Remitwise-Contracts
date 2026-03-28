@@ -178,3 +178,153 @@ fn test_duplicate_addresses_rejected() {
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().unwrap() as u32, 11);
 }
+
+// ============================================================================
+// Nonce / Replay Protection Tests
+// ============================================================================
+#[cfg(test)]
+mod nonce_tests {
+    use super::tests::setup;
+    use super::*;
+
+    #[test]
+    fn test_nonce_replay_savings_deposit_rejected() {
+        let (env, orchestrator_id, family_wallet_id, _, savings_id, _, _, user) = setup();
+        let client = OrchestratorClient::new(&env, &orchestrator_id);
+        // First call with nonce=42 succeeds
+        let r1 = client.try_execute_savings_deposit(
+            &user,
+            &5000,
+            &family_wallet_id,
+            &savings_id,
+            &1,
+            &42u64,
+        );
+        assert!(r1.is_ok());
+        // Replay with same nonce must be rejected
+        let r2 = client.try_execute_savings_deposit(
+            &user,
+            &5000,
+            &family_wallet_id,
+            &savings_id,
+            &1,
+            &42u64,
+        );
+        assert_eq!(
+            r2.unwrap_err().unwrap(),
+            OrchestratorError::NonceAlreadyUsed
+        );
+    }
+
+    #[test]
+    fn test_nonce_different_values_both_succeed() {
+        let (env, orchestrator_id, family_wallet_id, _, savings_id, _, _, user) = setup();
+        let client = OrchestratorClient::new(&env, &orchestrator_id);
+        let r1 = client.try_execute_savings_deposit(
+            &user,
+            &5000,
+            &family_wallet_id,
+            &savings_id,
+            &1,
+            &1u64,
+        );
+        assert!(r1.is_ok());
+        let r2 = client.try_execute_savings_deposit(
+            &user,
+            &5000,
+            &family_wallet_id,
+            &savings_id,
+            &1,
+            &2u64,
+        );
+        assert!(r2.is_ok());
+    }
+
+    #[test]
+    fn test_nonce_scoped_per_command_type() {
+        let (env, orchestrator_id, family_wallet_id, _, savings_id, bills_id, _, user) = setup();
+        let client = OrchestratorClient::new(&env, &orchestrator_id);
+        // Same nonce value on different command types must both succeed
+        let r1 = client.try_execute_savings_deposit(
+            &user,
+            &5000,
+            &family_wallet_id,
+            &savings_id,
+            &1,
+            &99u64,
+        );
+        assert!(r1.is_ok());
+        let r2 =
+            client.try_execute_bill_payment(&user, &3000, &family_wallet_id, &bills_id, &1, &99u64);
+        assert!(r2.is_ok());
+    }
+
+    #[test]
+    fn test_nonce_scoped_per_caller() {
+        let (env, orchestrator_id, family_wallet_id, _, savings_id, _, _, _) = setup();
+        let client = OrchestratorClient::new(&env, &orchestrator_id);
+        let user_a = Address::generate(&env);
+        let user_b = Address::generate(&env);
+        // Same nonce on different callers must both succeed
+        let r1 = client.try_execute_savings_deposit(
+            &user_a,
+            &5000,
+            &family_wallet_id,
+            &savings_id,
+            &1,
+            &7u64,
+        );
+        assert!(r1.is_ok());
+        let r2 = client.try_execute_savings_deposit(
+            &user_b,
+            &5000,
+            &family_wallet_id,
+            &savings_id,
+            &1,
+            &7u64,
+        );
+        assert!(r2.is_ok());
+    }
+
+    #[test]
+    fn test_nonce_replay_bill_payment_rejected() {
+        let (env, orchestrator_id, family_wallet_id, _, _, bills_id, _, user) = setup();
+        let client = OrchestratorClient::new(&env, &orchestrator_id);
+        let r1 =
+            client.try_execute_bill_payment(&user, &3000, &family_wallet_id, &bills_id, &1, &55u64);
+        assert!(r1.is_ok());
+        let r2 =
+            client.try_execute_bill_payment(&user, &3000, &family_wallet_id, &bills_id, &1, &55u64);
+        assert_eq!(
+            r2.unwrap_err().unwrap(),
+            OrchestratorError::NonceAlreadyUsed
+        );
+    }
+
+    #[test]
+    fn test_nonce_replay_insurance_payment_rejected() {
+        let (env, orchestrator_id, family_wallet_id, _, _, _, insurance_id, user) = setup();
+        let client = OrchestratorClient::new(&env, &orchestrator_id);
+        let r1 = client.try_execute_insurance_payment(
+            &user,
+            &2000,
+            &family_wallet_id,
+            &insurance_id,
+            &1,
+            &77u64,
+        );
+        assert!(r1.is_ok());
+        let r2 = client.try_execute_insurance_payment(
+            &user,
+            &2000,
+            &family_wallet_id,
+            &insurance_id,
+            &1,
+            &77u64,
+        );
+        assert_eq!(
+            r2.unwrap_err().unwrap(),
+            OrchestratorError::NonceAlreadyUsed
+        );
+    }
+}
