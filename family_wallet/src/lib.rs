@@ -409,20 +409,38 @@ impl FamilyWallet {
         members.get(member_address)
     }
 
+    /// Update the spending limit for an existing family member.
+    ///
+    /// # Authorization
+    /// Only Owner or Admin can update spending limits.
+    ///
+    /// # Arguments
+    /// * `caller` - The address performing the update (must be Owner or Admin)
+    /// * `member_address` - The member whose limit to update (must exist)
+    /// * `new_limit` - New spending limit in stroops (>= 0)
+    ///
+    /// # Returns
+    /// `bool` - true on successful update
+    ///
+    /// # Security
+    /// - Validates caller is Owner or Admin
+    /// - Ensures member exists
+    /// - Enforces non-negative limits
+    /// - Emits SpendingLimitUpdatedEvent on success
     pub fn update_spending_limit(
         env: Env,
         caller: Address,
         member_address: Address,
         new_limit: i128,
-    ) -> Result<bool, Error> {
+    ) -> bool {
         caller.require_auth();
         Self::require_not_paused(&env);
 
         if !Self::is_owner_or_admin(&env, &caller) {
-            return Err(Error::Unauthorized);
+            panic!("Only Owner or Admin can update spending limits");
         }
         if new_limit < 0 {
-            return Err(Error::InvalidSpendingLimit);
+            panic!("InvalidSpendingLimit");
         }
 
         let mut members: Map<Address, FamilyMember> = env
@@ -433,7 +451,8 @@ impl FamilyWallet {
 
         let mut record = members
             .get(member_address.clone())
-            .ok_or(Error::MemberNotFound)?;
+            .ok_or(Error::MemberNotFound)
+            .unwrap_or_else(|_| panic!("MemberNotFound"));
 
         let old_limit = record.spending_limit;
         record.spending_limit = new_limit;
@@ -458,7 +477,7 @@ impl FamilyWallet {
             },
         );
 
-        Ok(true)
+        true
     }
 
     /// Check if `caller` is allowed to spend `amount`.
@@ -1004,6 +1023,23 @@ impl FamilyWallet {
         true
     }
 
+    /// Remove a family member from the wallet.
+    ///
+    /// # Authorization
+    /// Only Owner can remove family members.
+    ///
+    /// # Arguments
+    /// * `caller` - The address performing the removal (must be Owner)
+    /// * `member` - The member address to remove
+    ///
+    /// # Returns
+    /// `bool` - true on successful removal
+    ///
+    /// # Security
+    /// - Validates caller is Owner
+    /// - Prevents removing the Owner
+    /// - Silently succeeds if member doesn't exist
+    /// - Records access audit entry
     pub fn remove_family_member(env: Env, caller: Address, member: Address) -> bool {
         caller.require_auth();
         Self::require_not_paused(&env);
