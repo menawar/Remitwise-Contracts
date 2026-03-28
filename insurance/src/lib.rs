@@ -4,16 +4,16 @@ use soroban_sdk::{
     Address, Env, Map, String, Vec,
 };
 
-// ── Coverage type (defined locally to avoid cross-crate DLL issues) ───────────
+// ── Coverage type ─────────────────────────────────────────────────────────────
 
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum CoverageType {
-    Health   = 1,
-    Life     = 2,
-    Property = 3,
-    Auto     = 4,
+    Health    = 1,
+    Life      = 2,
+    Property  = 3,
+    Auto      = 4,
     Liability = 5,
 }
 
@@ -23,11 +23,11 @@ pub enum CoverageType {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum InsuranceError {
-    Unauthorized   = 1,
-    InvalidAmount  = 2,
-    PolicyNotFound = 3,
-    PolicyInactive = 4,
-    InvalidPremium = 5,
+    Unauthorized    = 1,
+    InvalidAmount   = 2,
+    PolicyNotFound  = 3,
+    PolicyInactive  = 4,
+    InvalidPremium  = 5,
     InvalidCoverage = 6,
 }
 
@@ -45,7 +45,7 @@ pub struct InsurancePolicy {
     pub active: bool,
     pub next_payment_date: u64,
     pub external_ref: Option<String>,
-    /// Policy tags — deduplicated, max 32 chars each
+    /// Policy tags — deduplicated, max 32 chars each.
     pub tags: Vec<String>,
 }
 
@@ -65,8 +65,15 @@ impl Insurance {
 
     // ── Admin ─────────────────────────────────────────────────────────────────
 
-    /// Set the contract admin. Can only be called once (bootstrap) or by the
-    /// existing admin.
+    /// @notice Set or transfer the contract admin role.
+    ///
+    /// @dev On first call (no admin set) `caller` must equal `new_admin` —
+    ///      this bootstraps the admin without a separate init step.
+    ///      On subsequent calls the existing admin must sign.
+    ///
+    /// @param caller    The address authorising this call. Must be the current
+    ///                  admin, or equal to `new_admin` if no admin is set yet.
+    /// @param new_admin The address to install as the new admin.
     pub fn set_admin(env: Env, caller: Address, new_admin: Address) {
         caller.require_auth();
         let current: Option<Address> = env.storage().instance().get(&KEY_ADMIN);
@@ -96,14 +103,24 @@ impl Insurance {
     }
 
     fn bump(env: &Env) {
-        env.storage()
-            .instance()
-            .extend_ttl(17280, 518400);
+        env.storage().instance().extend_ttl(17280, 518400);
     }
 
     // ── Policy CRUD ───────────────────────────────────────────────────────────
 
-    /// Create a new insurance policy. Caller must authorise.
+    /// @notice Create a new insurance policy for the caller.
+    ///
+    /// @dev Assigns a monotonically increasing `u32` ID starting at 1.
+    ///      The policy is stored in instance storage and the TTL is bumped.
+    ///      `tags` is initialised to an empty vector.
+    ///
+    /// @param owner           The policyholder address. Must sign the transaction.
+    /// @param name            Human-readable policy label (1–64 bytes).
+    /// @param coverage_type   One of the `CoverageType` enum variants.
+    /// @param monthly_premium Monthly cost in stroops. Must be > 0.
+    /// @param coverage_amount Insured value in stroops. Must be > 0.
+    ///
+    /// @return The newly assigned policy ID (`u32`).
     pub fn create_policy(
         env: Env,
         owner: Address,
@@ -154,7 +171,19 @@ impl Insurance {
         next_id
     }
 
-    /// Pay a premium. Caller must be the policy owner.
+    /// @notice Record a premium payment and advance the next-due date by 30 days.
+    ///
+    /// @dev Only the policy owner may pay. Paying on an inactive policy returns
+    ///      `InsuranceError::PolicyInactive` rather than panicking.
+    ///
+    /// @param caller    The address making the payment. Must be the policy owner.
+    /// @param policy_id The ID of the policy to pay.
+    ///
+    /// @return `Ok(())` on success.
+    ///
+    /// @custom:error `PolicyNotFound` — `policy_id` does not exist.
+    /// @custom:error `Unauthorized`   — `caller` is not the policy owner.
+    /// @custom:error `PolicyInactive` — the policy has been deactivated.
     pub fn pay_premium(env: Env, caller: Address, policy_id: u32) -> Result<(), InsuranceError> {
         caller.require_auth();
         Self::bump(&env);
@@ -182,8 +211,23 @@ impl Insurance {
         Ok(())
     }
 
-    /// Deactivate a policy. Caller must be the policy owner.
-    pub fn deactivate_policy(env: Env, caller: Address, policy_id: u32) -> Result<bool, InsuranceError> {
+    /// @notice Deactivate a policy, preventing future premium payments.
+    ///
+    /// @dev Sets `policy.active = false`. The record is retained in storage
+    ///      for historical queries. Only the policy owner may deactivate.
+    ///
+    /// @param caller    The address requesting deactivation. Must be the policy owner.
+    /// @param policy_id The ID of the policy to deactivate.
+    ///
+    /// @return `Ok(true)` on success.
+    ///
+    /// @custom:error `PolicyNotFound` — `policy_id` does not exist.
+    /// @custom:error `Unauthorized`   — `caller` is not the policy owner.
+    pub fn deactivate_policy(
+        env: Env,
+        caller: Address,
+        policy_id: u32,
+    ) -> Result<bool, InsuranceError> {
         caller.require_auth();
         Self::bump(&env);
 
@@ -207,12 +251,23 @@ impl Insurance {
         Ok(true)
     }
 
-    /// Get a policy by ID.
+    /// @notice Retrieve a policy record by its ID.
+    ///
+    /// @param policy_id The ID of the policy to look up.
+    ///
+    /// @return `Some(InsurancePolicy)` if found, `None` otherwise.
     pub fn get_policy(env: Env, policy_id: u32) -> Option<InsurancePolicy> {
         Self::load_policies(&env).get(policy_id)
     }
 
-    /// Get all active policies for an owner.
+    /// @notice Return all active policies belonging to a given owner.
+    ///
+    /// @dev Performs a full scan of instance storage. For large portfolios
+    ///      consider paginating at the application layer.
+    ///
+    /// @param owner The address whose active policies are requested.
+    ///
+    /// @return A `Vec<InsurancePolicy>` containing only active policies for `owner`.
     pub fn get_active_policies(env: Env, owner: Address) -> Vec<InsurancePolicy> {
         let policies = Self::load_policies(&env);
         let mut result = Vec::new(&env);
@@ -224,7 +279,15 @@ impl Insurance {
         result
     }
 
-    /// Get total monthly premium for all active policies of an owner.
+    /// @notice Sum the monthly premiums of all active policies for an owner.
+    ///
+    /// @dev Uses `saturating_add` to prevent overflow on very large portfolios.
+    ///      Inactive policies are excluded from the sum.
+    ///
+    /// @param owner The address whose premium total is requested.
+    ///
+    /// @return Total monthly premium in stroops (`i128`). Returns 0 if the
+    ///         owner has no active policies.
     pub fn get_total_monthly_premium(env: Env, owner: Address) -> i128 {
         let policies = Self::load_policies(&env);
         let mut total = 0i128;
@@ -238,27 +301,41 @@ impl Insurance {
 
     // ── Tag management ────────────────────────────────────────────────────────
 
-    /// Add a tag to a policy.
+    /// @notice Attach a string label (tag) to a policy.
     ///
-    /// # Authorization
-    /// Only the **policy owner** or the contract **admin** may add tags.
+    /// @dev **Authorization** — `caller` must be either the policy owner or the
+    ///      contract admin. Both roles are checked after `require_auth()`.
     ///
-    /// # Deduplication
-    /// If the tag already exists on the policy it is silently skipped — no
-    /// duplicate is stored and no error is returned.
+    ///      **Deduplication** — before writing, the function performs a linear
+    ///      scan of the policy's existing `tags` vector:
     ///
-    /// # Events
-    /// Emits `("insure", "tag_added")` with `(policy_id, tag)` as data.
+    ///      ```text
+    ///      for existing in policy.tags.iter() {
+    ///          if existing == tag { return; }  // early exit, no write, no event
+    ///      }
+    ///      ```
     ///
-    /// # Panics
-    /// - If `policy_id` does not exist.
-    /// - If `caller` is neither the policy owner nor the admin.
-    /// - If `tag` is empty or longer than 32 characters.
+    ///      If the tag is already present the function returns immediately.
+    ///      No storage write occurs and no event is emitted. This prevents
+    ///      unbounded vector growth from repeated calls with the same value.
+    ///      The check is byte-exact and case-sensitive.
+    ///
+    /// @param caller    The address requesting the operation. Must be the policy
+    ///                  owner or the contract admin, and must sign the transaction.
+    /// @param policy_id The ID of the policy to tag.
+    /// @param tag       The label to attach. Must be 1-32 bytes (UTF-8).
+    ///
+    /// @custom:event `("insure", "tag_added")` — emitted with data `(policy_id, tag)`
+    ///               only when the tag is new. Duplicate calls produce no event.
+    ///
+    /// @custom:panics `"policy not found"`           — `policy_id` does not exist.
+    /// @custom:panics `"unauthorized"`               — caller is neither owner nor admin.
+    /// @custom:panics `"tag must be 1-32 characters"` — tag length out of range.
     pub fn add_tag(env: Env, caller: Address, policy_id: u32, tag: String) {
         caller.require_auth();
 
         if tag.len() == 0 || tag.len() > 32 {
-            panic!("tag must be 1–32 characters");
+            panic!("tag must be 1-32 characters");
         }
 
         Self::bump(&env);
@@ -277,7 +354,7 @@ impl Insurance {
         // Deduplication: skip if tag already present
         for existing in policy.tags.iter() {
             if existing == tag {
-                return; // already exists, nothing to do
+                return; // already exists — no write, no event
             }
         }
 
@@ -292,22 +369,31 @@ impl Insurance {
         );
     }
 
-    /// Remove a tag from a policy.
+    /// @notice Remove a string label from a policy.
     ///
-    /// # Authorization
-    /// Only the **policy owner** or the contract **admin** may remove tags.
+    /// @dev **Authorization** — same two-role model as `add_tag`: caller must
+    ///      be the policy owner or the contract admin.
     ///
-    /// # Graceful removal
-    /// If the tag does not exist on the policy, the function returns without
-    /// panicking and emits a `"tag_no_tag"` ("Tag Not Found") event instead.
+    ///      **Graceful removal** — if the tag is not present the function does
+    ///      NOT panic. Instead it emits a `tag_miss` event and returns. This
+    ///      prevents a front-running denial-of-service where an attacker removes
+    ///      a tag just before a legitimate call, causing that call to fail.
     ///
-    /// # Events
-    /// - `("insure", "tag_removed")` with `(policy_id, tag)` when removed.
-    /// - `("insure", "tag_no_tag")` with `(policy_id, tag)` when not found.
+    ///      The removal rebuilds the tags vector, excluding the matched entry.
+    ///      All other tags are preserved in their original order.
     ///
-    /// # Panics
-    /// - If `policy_id` does not exist.
-    /// - If `caller` is neither the policy owner nor the admin.
+    /// @param caller    The address requesting the operation. Must be the policy
+    ///                  owner or the contract admin, and must sign the transaction.
+    /// @param policy_id The ID of the policy to modify.
+    /// @param tag       The label to remove. Match is byte-exact and case-sensitive.
+    ///
+    /// @custom:event `("insure", "tag_rmvd")` — emitted with data `(policy_id, tag)`
+    ///               when the tag was found and removed.
+    /// @custom:event `("insure", "tag_miss")` — emitted with data `(policy_id, tag)`
+    ///               when the tag was not present (graceful no-op path).
+    ///
+    /// @custom:panics `"policy not found"` — `policy_id` does not exist.
+    /// @custom:panics `"unauthorized"`     — caller is neither owner nor admin.
     pub fn remove_tag(env: Env, caller: Address, policy_id: u32, tag: String) {
         caller.require_auth();
         Self::bump(&env);
@@ -324,19 +410,19 @@ impl Insurance {
             panic!("unauthorized");
         }
 
-        // Find the tag
+        // Find and remove the tag
         let mut found = false;
         let mut new_tags = Vec::new(&env);
         for existing in policy.tags.iter() {
             if existing == tag {
-                found = true; // skip it (remove)
+                found = true; // skip — this is the removal
             } else {
                 new_tags.push_back(existing);
             }
         }
 
         if !found {
-            // Graceful: emit "Tag Not Found" event, do not panic
+            // Graceful: emit Tag Not Found event, do not panic
             env.events().publish(
                 (symbol_short!("insure"), symbol_short!("tag_miss")),
                 (policy_id, tag),

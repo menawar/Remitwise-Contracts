@@ -17,6 +17,7 @@
 9. [Running Tests](#running-tests)
 10. [Integration Guide](#integration-guide)
 11. [Security Notes](#security-notes)
+12. [Security Assumptions](#security-assumptions)
 
 ---
 
@@ -195,6 +196,42 @@ Uses `saturating_add` to prevent overflow on extremely large portfolios.
 
 ---
 
+### `add_tag(caller, policy_id, tag)`
+
+Attaches a string label to a policy. Duplicate tags are silently ignored.
+
+**Parameters**
+
+| Parameter   | Type      | Description                                              |
+|-------------|-----------|----------------------------------------------------------|
+| `caller`    | `Address` | Must be the policy owner or contract admin (must sign)   |
+| `policy_id` | `u32`     | ID of the target policy                                  |
+| `tag`       | `String`  | Label to attach (1–32 bytes, case-sensitive)             |
+
+**Emits**: `("insure", "tag_added")` with data `(policy_id, tag)` — only when
+the tag is new. No event is emitted for a duplicate call.
+
+---
+
+### `remove_tag(caller, policy_id, tag)`
+
+Removes a string label from a policy. If the tag is not present the function
+returns gracefully without panicking.
+
+**Parameters**
+
+| Parameter   | Type      | Description                                              |
+|-------------|-----------|----------------------------------------------------------|
+| `caller`    | `Address` | Must be the policy owner or contract admin (must sign)   |
+| `policy_id` | `u32`     | ID of the target policy                                  |
+| `tag`       | `String`  | Label to remove (case-sensitive)                         |
+
+**Emits**:
+- `("insure", "tag_rmvd")` with data `(policy_id, tag)` when the tag was found and removed.
+- `("insure", "tag_miss")` with data `(policy_id, tag)` when the tag was not present.
+
+---
+
 ## Events
 
 All events are published via `env.events().publish(topic, data)` and can be
@@ -363,5 +400,126 @@ external_ref.len() in 1..=128  (if supplied)
 5. **Pre-mainnet gaps** (inherited from project-level THREAT_MODEL.md):
    - `[SECURITY-003]` Rate limiting for emergency transfers is not yet implemented.
    - `[SECURITY-005]` MAX_POLICIES (1,000) provides a soft cap but no per-user limit.
+
+For security disclosures, email **security@remitwise.com**.
+
+---
+
+## Security Assumptions
+
+This section documents the explicit trust assumptions and security properties
+of the **policy tagging system** (`add_tag` / `remove_tag`). Reviewers should
+verify each assumption holds before approving changes to this area.
+
+### SA-1 — Caller Identity is Verified by the Runtime
+
+`add_tag` and `remove_tag` both call `caller.require_auth()` as their **first**
+instruction. Soroban's host enforces this: if the transaction does not carry a
+valid signature for `caller`, the call is rejected before any contract logic
+runs. This means:
+
+- No tag mutation can occur without an on-chain signature from an authorised address.
+- The contract never trusts a caller address passed as a parameter without
+  verifying it cryptographically.
+
+### SA-2 — Two-Role Authorization Model
+
+Tag mutation is restricted to exactly two roles:
+
+| Role           | How it is determined                                      |
+|----------------|-----------------------------------------------------------|
+| **Policy owner** | `policy.owner == caller` — set immutably at `create_policy` time |
+| **Admin**        | `KEY_ADMIN` storage slot — set via `set_admin`, which itself requires the current admin's signature |
+
+Any address that is neither the policy owner nor the admin will hit the
+`panic!("unauthorized")` guard. There is no privilege escalation path between
+roles: an admin cannot change who owns a policy, and a policy owner cannot
+grant themselves admin rights.
+
+### SA-3 — Deduplication Prevents State Bloat
+
+**How it works:**
+
+Before appending a new tag, `add_tag` performs a linear scan of the policy's
+existing `tags: Vec<String>`:
+
+```
+for existing in policy.tags.iter() {
+    if existing == tag {
+        return;   // ← early exit, no write, no event
+    }
+}
+```
+
+If a match is found the function returns immediately — **no storage write
+occurs and no event is emitted**. This means:
+
+- A tag can appear at most once per policy, regardless of how many times
+  `add_tag` is called with the same value.
+- Repeated duplicate calls are free from a state-bloat perspective; they
+  consume ledger fees but produce no lasting effect.
+- The deduplication check is case-sensitive and byte-exact. `"active"` and
+  `"ACTIVE"` are treated as distinct tags.
+
+**Why this matters for security:**
+
+Without deduplication, a malicious or buggy caller could inflate the `tags`
+vector to an arbitrary size, increasing the storage footprint of every policy
+read/write and potentially causing out-of-gas failures for legitimate users.
+The linear scan is O(n) in the number of existing tags, which is bounded by
+the 32-character tag length limit and the practical cost of adding each tag.
+
+### SA-4 — Graceful Removal (No Panic on Missing Tag)
+
+`remove_tag` does **not** panic when the requested tag is absent. Instead it:
+
+1. Completes the full authorization check (SA-1, SA-2 still apply).
+2. Emits a `("insure", "tag_miss")` event carrying `(policy_id, tag)`.
+3. Returns without modifying storage.
+
+This design choice prevents a denial-of-service vector where an attacker
+front-runs a legitimate `remove_tag` call with their own `remove_tag` for the
+same tag, causing the legitimate call to panic and the transaction to fail.
+
+### SA-5 — Tag Length Validation
+
+Every tag is validated before any storage access:
+
+```
+if tag.len() == 0 || tag.len() > 32 {
+    panic!("tag must be 1–32 characters");
+}
+```
+
+This guard runs **before** the authorization check intentionally — it is a
+cheap, stateless validation that rejects obviously malformed inputs without
+touching storage. The 32-character ceiling limits the per-tag storage cost and
+keeps the deduplication scan fast.
+
+### SA-6 — Tags Do Not Affect Policy Lifecycle
+
+Tags are metadata only. They have no effect on:
+
+- Whether a policy is active or inactive.
+- Whether a premium payment is accepted.
+- The `next_payment_date` calculation.
+- The `get_total_monthly_premium` aggregation.
+
+A reviewer can therefore audit the tagging system in isolation without
+reasoning about interactions with the premium payment or deactivation logic.
+
+### SA-7 — Event Integrity
+
+Every successful tag mutation emits exactly one event:
+
+| Operation                  | Topic symbol  | Data              |
+|----------------------------|---------------|-------------------|
+| Tag added (new)            | `tag_added`   | `(policy_id, tag)` |
+| Tag removed (found)        | `tag_rmvd`    | `(policy_id, tag)` |
+| Tag removed (not found)    | `tag_miss`    | `(policy_id, tag)` |
+| Duplicate add (no-op)      | *(none)*      | —                 |
+
+The absence of an event on a duplicate add is intentional and tested. Off-chain
+indexers can rely on `tag_added` as a signal that storage was actually mutated.
 
 For security disclosures, email **security@remitwise.com**.
