@@ -2,10 +2,10 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as AddressTrait, Events, Ledger},
     testutils::storage::Instance as StorageInstance,
+    testutils::{Address as AddressTrait, Events, Ledger, LedgerInfo},
     token::{StellarAssetClient, TokenClient},
-    Address, Env, Symbol, TryFromVal,
+    Address, Env, Symbol, TryFromVal, TryIntoVal,
 };
 
 // ---------------------------------------------------------------------------
@@ -15,7 +15,9 @@ use soroban_sdk::{
 /// Register a native Stellar asset (SAC) and return (contract_id, admin).
 /// The admin is the issuer; we mint `amount` to `recipient`.
 fn setup_token(env: &Env, admin: &Address, recipient: &Address, amount: i128) -> Address {
-    let token_id = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let token_id = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
     let sac = StellarAssetClient::new(env, &token_id);
     sac.mint(recipient, &amount);
     token_id
@@ -31,9 +33,77 @@ fn make_accounts(env: &Env) -> AccountGroup {
     }
 }
 
+/// Set a deterministic ledger timestamp for schedule-related tests.
+fn set_test_ledger(env: &Env, timestamp: u64) {
+    env.ledger().set(LedgerInfo {
+        protocol_version: 20,
+        sequence_number: 100,
+        timestamp,
+        network_id: [0; 32],
+        base_reserve: 10,
+        min_temp_entry_ttl: 1,
+        min_persistent_entry_ttl: 1,
+        max_entry_ttl: 100_000,
+    });
+}
+
+/// Register and initialize a fresh split contract with the default 50/30/15/5 allocation.
+fn setup_initialized_split<'a>(
+    env: &'a Env,
+    initial_balance: i128,
+) -> (RemittanceSplitClient<'a>, Address, Address) {
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(env, &contract_id);
+    let owner = Address::generate(env);
+    let token_admin = Address::generate(env);
+    let token_id = setup_token(env, &token_admin, &owner, initial_balance);
+
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+    (client, owner, token_id)
+}
+
 // ---------------------------------------------------------------------------
 // initialize_split
 // ---------------------------------------------------------------------------
+
+#[test]
+fn test_initialize_split_domain_separated_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+
+    // Verify that the authorization includes the full domain-separated payload
+    let auths = env.auths();
+    assert_eq!(auths.len(), 1);
+    
+    // The auths captured by mock_all_auths record what was authorized.
+    // In our case, the contract calls owner.require_auth_for_args(payload).
+    let (address, auth_invocation) = auths.get(0).unwrap();
+    assert_eq!(address, owner);
+    
+    // The top-level invocation from mock_all_auths for require_auth_for_args
+    // will have the authorized arguments.
+    let payload_val = auth_invocation.args.get(0).unwrap();
+    let payload: SplitAuthPayload = payload_val.try_into_val(&env).unwrap();
+    
+    assert_eq!(payload.domain_id, symbol_short!("init"));
+    assert_eq!(payload.network_id, env.ledger().network_id());
+    assert_eq!(payload.contract_addr, contract_id);
+    assert_eq!(payload.owner_addr, owner);
+    assert_eq!(payload.nonce_val, 0);
+    assert_eq!(payload.usdc_contract, token_id);
+    assert_eq!(payload.spending_percent, 50);
+    assert_eq!(payload.savings_percent, 30);
+    assert_eq!(payload.bills_percent, 15);
+    assert_eq!(payload.insurance_percent, 5);
+}
 
 #[test]
 fn test_initialize_split_succeeds() {
@@ -68,7 +138,10 @@ fn test_initialize_split_invalid_sum() {
     let token_id = setup_token(&env, &token_admin, &owner, 0);
 
     let result = client.try_initialize_split(&owner, &0, &token_id, &50, &50, &10, &0);
-    assert_eq!(result, Err(Ok(RemittanceSplitError::PercentagesDoNotSumTo100)));
+    assert_eq!(
+        result,
+        Err(Ok(RemittanceSplitError::PercentagesDoNotSumTo100))
+    );
 }
 
 #[test]
@@ -124,6 +197,18 @@ fn test_update_split() {
 }
 
 #[test]
+fn test_update_split_nonce_increments_and_replay_is_rejected() {
+    let env = Env::default();
+    let (client, owner, _token_id) = setup_initialized_split(&env, 0);
+
+    client.update_split(&owner, &1, &40, &40, &10, &10);
+
+    assert_eq!(client.get_nonce(&owner), 2);
+    let replay = client.try_update_split(&owner, &1, &25, &25, &25, &25);
+    assert_eq!(replay, Err(Ok(RemittanceSplitError::InvalidNonce)));
+}
+
+#[test]
 fn test_update_split_unauthorized() {
     let env = Env::default();
     env.mock_all_auths();
@@ -163,7 +248,87 @@ fn test_update_split_percentages_must_sum_to_100() {
 
     client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
     let result = client.try_update_split(&owner, &1, &60, &30, &15, &5);
-    assert_eq!(result, Err(Ok(RemittanceSplitError::PercentagesDoNotSumTo100)));
+    assert_eq!(
+        result,
+        Err(Ok(RemittanceSplitError::PercentagesDoNotSumTo100))
+    );
+}
+
+#[test]
+fn test_update_split_paused_rejected_and_unpause_restores_access() {
+    let env = Env::default();
+    let (client, owner, _token_id) = setup_initialized_split(&env, 0);
+
+    client.pause(&owner);
+    let paused = client.try_update_split(&owner, &1, &40, &40, &10, &10);
+    assert_eq!(paused, Err(Ok(RemittanceSplitError::Unauthorized)));
+
+    client.unpause(&owner);
+    client.update_split(&owner, &1, &40, &40, &10, &10);
+
+    let config = client.get_config().unwrap();
+    assert_eq!(config.spending_percent, 40);
+    assert_eq!(config.savings_percent, 40);
+    assert_eq!(config.bills_percent, 10);
+    assert_eq!(config.insurance_percent, 10);
+}
+
+// ---------------------------------------------------------------------------
+// Pause controls
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_pause_rejects_unauthorized_caller() {
+    let env = Env::default();
+    let (client, _owner, _token_id) = setup_initialized_split(&env, 0);
+    let attacker = Address::generate(&env);
+
+    let result = client.try_pause(&attacker);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::Unauthorized)));
+    assert!(!client.is_paused());
+}
+
+#[test]
+fn test_pause_admin_transfer_is_blocked_while_paused_and_restored_after_unpause() {
+    let env = Env::default();
+    let (client, owner, _token_id) = setup_initialized_split(&env, 0);
+    let delegated_admin = Address::generate(&env);
+
+    client.set_pause_admin(&owner, &delegated_admin);
+
+    let old_admin_pause = client.try_pause(&owner);
+    assert_eq!(old_admin_pause, Err(Ok(RemittanceSplitError::Unauthorized)));
+
+    client.pause(&delegated_admin);
+    assert!(client.is_paused());
+
+    let repeated_pause = client.try_pause(&delegated_admin);
+    assert_eq!(repeated_pause, Err(Ok(RemittanceSplitError::Unauthorized)));
+
+    let paused_transfer = client.try_set_pause_admin(&owner, &owner);
+    assert_eq!(paused_transfer, Err(Ok(RemittanceSplitError::Unauthorized)));
+
+    client.unpause(&delegated_admin);
+    client.set_pause_admin(&owner, &owner);
+
+    client.pause(&owner);
+    assert!(client.is_paused());
+    client.unpause(&owner);
+    assert!(!client.is_paused());
+}
+
+#[test]
+fn test_calculate_split_remains_available_while_paused() {
+    let env = Env::default();
+    let (client, owner, _token_id) = setup_initialized_split(&env, 0);
+
+    client.pause(&owner);
+
+    let amounts = client.calculate_split(&1000);
+    assert_eq!(amounts.get(0).unwrap(), 500);
+    assert_eq!(amounts.get(1).unwrap(), 300);
+    assert_eq!(amounts.get(2).unwrap(), 150);
+    assert_eq!(amounts.get(3).unwrap(), 50);
 }
 
 // ---------------------------------------------------------------------------
@@ -377,7 +542,10 @@ fn test_distribute_usdc_untrusted_token_rejected() {
     let evil_token = Address::generate(&env);
     let accounts = make_accounts(&env);
     let result = client.try_distribute_usdc(&evil_token, &owner, &1, &accounts, &1_000);
-    assert_eq!(result, Err(Ok(RemittanceSplitError::UntrustedTokenContract)));
+    assert_eq!(
+        result,
+        Err(Ok(RemittanceSplitError::UntrustedTokenContract))
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -404,7 +572,10 @@ fn test_distribute_usdc_self_transfer_spending_rejected() {
         insurance: Address::generate(&env),
     };
     let result = client.try_distribute_usdc(&token_id, &owner, &1, &accounts, &1_000);
-    assert_eq!(result, Err(Ok(RemittanceSplitError::SelfTransferNotAllowed)));
+    assert_eq!(
+        result,
+        Err(Ok(RemittanceSplitError::SelfTransferNotAllowed))
+    );
 }
 
 #[test]
@@ -426,7 +597,10 @@ fn test_distribute_usdc_self_transfer_savings_rejected() {
         insurance: Address::generate(&env),
     };
     let result = client.try_distribute_usdc(&token_id, &owner, &1, &accounts, &1_000);
-    assert_eq!(result, Err(Ok(RemittanceSplitError::SelfTransferNotAllowed)));
+    assert_eq!(
+        result,
+        Err(Ok(RemittanceSplitError::SelfTransferNotAllowed))
+    );
 }
 
 #[test]
@@ -448,7 +622,10 @@ fn test_distribute_usdc_self_transfer_bills_rejected() {
         insurance: Address::generate(&env),
     };
     let result = client.try_distribute_usdc(&token_id, &owner, &1, &accounts, &1_000);
-    assert_eq!(result, Err(Ok(RemittanceSplitError::SelfTransferNotAllowed)));
+    assert_eq!(
+        result,
+        Err(Ok(RemittanceSplitError::SelfTransferNotAllowed))
+    );
 }
 
 #[test]
@@ -470,7 +647,10 @@ fn test_distribute_usdc_self_transfer_insurance_rejected() {
         insurance: owner.clone(),
     };
     let result = client.try_distribute_usdc(&token_id, &owner, &1, &accounts, &1_000);
-    assert_eq!(result, Err(Ok(RemittanceSplitError::SelfTransferNotAllowed)));
+    assert_eq!(
+        result,
+        Err(Ok(RemittanceSplitError::SelfTransferNotAllowed))
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -555,7 +735,7 @@ fn test_distribute_usdc_replay_rejected() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_distribute_usdc_paused_rejected() {
+fn test_distribute_usdc_paused_rejected_and_unpause_restores_access() {
     let env = Env::default();
     env.mock_all_auths();
     let contract_id = env.register_contract(None, RemittanceSplit);
@@ -568,8 +748,17 @@ fn test_distribute_usdc_paused_rejected() {
     client.pause(&owner);
 
     let accounts = make_accounts(&env);
-    let result = client.try_distribute_usdc(&token_id, &owner, &1, &accounts, &1_000);
-    assert_eq!(result, Err(Ok(RemittanceSplitError::Unauthorized)));
+    let paused = client.try_distribute_usdc(&token_id, &owner, &1, &accounts, &1_000);
+    assert_eq!(paused, Err(Ok(RemittanceSplitError::Unauthorized)));
+
+    client.unpause(&owner);
+    client.distribute_usdc(&token_id, &owner, &1, &accounts, &1_000);
+
+    let token = TokenClient::new(&env, &token_id);
+    assert_eq!(token.balance(&accounts.spending), 500);
+    assert_eq!(token.balance(&accounts.savings), 300);
+    assert_eq!(token.balance(&accounts.bills), 150);
+    assert_eq!(token.balance(&accounts.insurance), 50);
 }
 
 // ---------------------------------------------------------------------------
@@ -665,9 +854,9 @@ fn test_distribute_usdc_multiple_rounds() {
 
     let token = TokenClient::new(&env, &token_id);
     assert_eq!(token.balance(&accounts.spending), 1_500); // 3 * 500
-    assert_eq!(token.balance(&accounts.savings), 900);    // 3 * 300
-    assert_eq!(token.balance(&accounts.bills), 450);      // 3 * 150
-    assert_eq!(token.balance(&accounts.insurance), 150);  // 3 * 50
+    assert_eq!(token.balance(&accounts.savings), 900); // 3 * 300
+    assert_eq!(token.balance(&accounts.bills), 450); // 3 * 150
+    assert_eq!(token.balance(&accounts.insurance), 150); // 3 * 50
     assert_eq!(token.balance(&owner), 0);
 }
 
@@ -771,6 +960,52 @@ fn test_update_split_events() {
 }
 
 // ---------------------------------------------------------------------------
+// Upgrade and snapshot safety
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_upgrade_mutators_paused_rejected_and_unpause_restores_access() {
+    let env = Env::default();
+    let (client, owner, _token_id) = setup_initialized_split(&env, 0);
+    let upgrade_admin = Address::generate(&env);
+    let next_upgrade_admin = Address::generate(&env);
+
+    client.set_upgrade_admin(&owner, &upgrade_admin);
+    client.pause(&owner);
+
+    let paused_admin_change = client.try_set_upgrade_admin(&owner, &next_upgrade_admin);
+    assert_eq!(
+        paused_admin_change,
+        Err(Ok(RemittanceSplitError::Unauthorized))
+    );
+
+    let paused_upgrade = client.try_set_version(&upgrade_admin, &2);
+    assert_eq!(paused_upgrade, Err(Ok(RemittanceSplitError::Unauthorized)));
+
+    client.unpause(&owner);
+    client.set_upgrade_admin(&upgrade_admin, &next_upgrade_admin);
+    client.set_version(&next_upgrade_admin, &2);
+
+    assert_eq!(client.get_version(), 2);
+}
+
+#[test]
+fn test_import_snapshot_paused_rejected_and_unpause_restores_access() {
+    let env = Env::default();
+    let (client, owner, _token_id) = setup_initialized_split(&env, 0);
+    let snapshot = client.export_snapshot(&owner).unwrap();
+
+    client.pause(&owner);
+    let paused = client.try_import_snapshot(&owner, &1, &snapshot);
+    assert_eq!(paused, Err(Ok(RemittanceSplitError::Unauthorized)));
+
+    client.unpause(&owner);
+    client.import_snapshot(&owner, &1, &snapshot);
+
+    assert_eq!(client.get_nonce(&owner), 2);
+}
+
+// ---------------------------------------------------------------------------
 // Remittance schedules
 // ---------------------------------------------------------------------------
 
@@ -834,6 +1069,43 @@ fn test_cancel_remittance_schedule() {
     assert!(!schedule.active);
 }
 
+#[test]
+fn test_schedule_mutators_paused_rejected_and_unpause_restores_access() {
+    let env = Env::default();
+    set_test_ledger(&env, 1000);
+    let (client, owner, _token_id) = setup_initialized_split(&env, 0);
+
+    let existing_schedule_id = client.create_remittance_schedule(&owner, &10000, &3000, &86400);
+    client.pause(&owner);
+
+    let paused_create = client.try_create_remittance_schedule(&owner, &5000, &4000, &0);
+    assert_eq!(paused_create, Err(Ok(RemittanceSplitError::Unauthorized)));
+
+    let paused_modify =
+        client.try_modify_remittance_schedule(&owner, &existing_schedule_id, &12000, &5000, &0);
+    assert_eq!(paused_modify, Err(Ok(RemittanceSplitError::Unauthorized)));
+
+    let paused_cancel = client.try_cancel_remittance_schedule(&owner, &existing_schedule_id);
+    assert_eq!(paused_cancel, Err(Ok(RemittanceSplitError::Unauthorized)));
+
+    client.unpause(&owner);
+
+    let new_schedule_id = client.create_remittance_schedule(&owner, &5000, &4000, &0);
+    client.modify_remittance_schedule(&owner, &new_schedule_id, &6000, &5000, &172800);
+    client.cancel_remittance_schedule(&owner, &existing_schedule_id);
+
+    let new_schedule = client.get_remittance_schedule(&new_schedule_id).unwrap();
+    assert_eq!(new_schedule.amount, 6000);
+    assert_eq!(new_schedule.next_due, 5000);
+    assert_eq!(new_schedule.interval, 172800);
+    assert!(new_schedule.active);
+
+    let cancelled_schedule = client
+        .get_remittance_schedule(&existing_schedule_id)
+        .unwrap();
+    assert!(!cancelled_schedule.active);
+}
+
 // ---------------------------------------------------------------------------
 // TTL extension
 // ---------------------------------------------------------------------------
@@ -861,7 +1133,10 @@ fn test_instance_ttl_extended_on_initialize_split() {
 
     client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
     let ttl = env.as_contract(&contract_id, || env.storage().instance().get_ttl());
-    assert!(ttl >= 518_400, "TTL must be >= INSTANCE_BUMP_AMOUNT after init");
+    assert!(
+        ttl >= 518_400,
+        "TTL must be >= INSTANCE_BUMP_AMOUNT after init"
+    );
 }
 
 // ============================================================================
@@ -875,7 +1150,6 @@ fn test_instance_ttl_extended_on_initialize_split() {
 //  5. import_snapshot rejects a tampered checksum regardless of version.
 // ============================================================================
 
-/// export_snapshot must embed schema_version == SCHEMA_VERSION (currently 1).
 #[test]
 fn test_export_snapshot_contains_correct_schema_version() {
     let env = Env::default();
@@ -883,19 +1157,16 @@ fn test_export_snapshot_contains_correct_schema_version() {
     let contract_id = env.register_contract(None, RemittanceSplit);
     let client = RemittanceSplitClient::new(&env, &contract_id);
     let owner = Address::generate(&env);
-    let token_admin = Address::generate(&env);
-    let token_id = setup_token(&env, &token_admin, &owner, 0);
-
+    let token_id = Address::generate(&env);
     client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
 
     let snapshot = client.export_snapshot(&owner).unwrap();
     assert_eq!(
-        snapshot.schema_version, 1,
-        "schema_version must equal SCHEMA_VERSION (1)"
+        snapshot.schema_version, 2,
+        "schema_version must equal SCHEMA_VERSION (2)"
     );
 }
 
-/// import_snapshot with the current schema version (1) must succeed.
 #[test]
 fn test_import_snapshot_current_schema_version_succeeds() {
     let env = Env::default();
@@ -903,20 +1174,16 @@ fn test_import_snapshot_current_schema_version_succeeds() {
     let contract_id = env.register_contract(None, RemittanceSplit);
     let client = RemittanceSplitClient::new(&env, &contract_id);
     let owner = Address::generate(&env);
-    let token_admin = Address::generate(&env);
-    let token_id = setup_token(&env, &token_admin, &owner, 0);
-
+    let token_id = Address::generate(&env);
     client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
 
     let snapshot = client.export_snapshot(&owner).unwrap();
-    assert_eq!(snapshot.schema_version, 1);
+    assert_eq!(snapshot.schema_version, 2);
 
     let ok = client.import_snapshot(&owner, &1, &snapshot);
     assert!(ok, "import with current schema version must succeed");
 }
 
-/// import_snapshot with a schema_version higher than SCHEMA_VERSION must
-/// return UnsupportedVersion (forward-compat rejection).
 #[test]
 fn test_import_snapshot_future_schema_version_rejected() {
     let env = Env::default();
@@ -924,9 +1191,7 @@ fn test_import_snapshot_future_schema_version_rejected() {
     let contract_id = env.register_contract(None, RemittanceSplit);
     let client = RemittanceSplitClient::new(&env, &contract_id);
     let owner = Address::generate(&env);
-    let token_admin = Address::generate(&env);
-    let token_id = setup_token(&env, &token_admin, &owner, 0);
-
+    let token_id = Address::generate(&env);
     client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
 
     let mut snapshot = client.export_snapshot(&owner).unwrap();
@@ -941,8 +1206,6 @@ fn test_import_snapshot_future_schema_version_rejected() {
     );
 }
 
-/// import_snapshot with schema_version = 0 (below MIN_SUPPORTED_SCHEMA_VERSION)
-/// must return UnsupportedVersion (backward-compat rejection).
 #[test]
 fn test_import_snapshot_too_old_schema_version_rejected() {
     let env = Env::default();
@@ -950,13 +1213,11 @@ fn test_import_snapshot_too_old_schema_version_rejected() {
     let contract_id = env.register_contract(None, RemittanceSplit);
     let client = RemittanceSplitClient::new(&env, &contract_id);
     let owner = Address::generate(&env);
-    let token_admin = Address::generate(&env);
-    let token_id = setup_token(&env, &token_admin, &owner, 0);
-
+    let token_id = Address::generate(&env);
     client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
 
     let mut snapshot = client.export_snapshot(&owner).unwrap();
-    // Simulate a snapshot too old to import.
+    // Simulate a snapshot too old to import (schema_version 0 < MIN_SUPPORTED_SCHEMA_VERSION 2).
     snapshot.schema_version = 0;
 
     let result = client.try_import_snapshot(&owner, &1, &snapshot);
@@ -967,8 +1228,6 @@ fn test_import_snapshot_too_old_schema_version_rejected() {
     );
 }
 
-/// import_snapshot with a tampered checksum must return ChecksumMismatch
-/// even when the schema_version is valid.
 #[test]
 fn test_import_snapshot_tampered_checksum_rejected() {
     let env = Env::default();
@@ -976,9 +1235,7 @@ fn test_import_snapshot_tampered_checksum_rejected() {
     let contract_id = env.register_contract(None, RemittanceSplit);
     let client = RemittanceSplitClient::new(&env, &contract_id);
     let owner = Address::generate(&env);
-    let token_admin = Address::generate(&env);
-    let token_id = setup_token(&env, &token_admin, &owner, 0);
-
+    let token_id = Address::generate(&env);
     client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
 
     let mut snapshot = client.export_snapshot(&owner).unwrap();
@@ -992,7 +1249,6 @@ fn test_import_snapshot_tampered_checksum_rejected() {
     );
 }
 
-/// Full export → import round-trip: data restored and nonce incremented.
 #[test]
 fn test_snapshot_export_import_roundtrip_restores_config() {
     let env = Env::default();
@@ -1000,20 +1256,17 @@ fn test_snapshot_export_import_roundtrip_restores_config() {
     let contract_id = env.register_contract(None, RemittanceSplit);
     let client = RemittanceSplitClient::new(&env, &contract_id);
     let owner = Address::generate(&env);
-    let token_admin = Address::generate(&env);
-    let token_id = setup_token(&env, &token_admin, &owner, 0);
-
+    let token_id = Address::generate(&env);
     client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
 
     // Update so there is something interesting to round-trip.
-    // Note: update_split checks the nonce but does NOT increment it.
     client.update_split(&owner, &1, &40, &40, &10, &10);
 
     let snapshot = client.export_snapshot(&owner).unwrap();
-    assert_eq!(snapshot.schema_version, 1);
+    assert_eq!(snapshot.schema_version, 2);
 
-    // Nonce is 1 after initialize_split (update_split does not increment nonce).
-    let ok = client.import_snapshot(&owner, &1, &snapshot);
+    // Nonce is 2 after initialize_split followed by update_split.
+    let ok = client.import_snapshot(&owner, &2, &snapshot);
     assert!(ok);
 
     let config = client.get_config().unwrap();
@@ -1023,18 +1276,12 @@ fn test_snapshot_export_import_roundtrip_restores_config() {
     assert_eq!(config.insurance_percent, 10);
 }
 
-/// Unauthorized caller must not be able to import a snapshot.
 #[test]
 fn test_import_snapshot_unauthorized_caller_rejected() {
     let env = Env::default();
-    env.mock_all_auths();
-    let contract_id = env.register_contract(None, RemittanceSplit);
-    let client = RemittanceSplitClient::new(&env, &contract_id);
-    let owner = Address::generate(&env);
+    let (client, owner, _token_id) = setup_initialized_split(&env, 0);
     let other = Address::generate(&env);
-    let token_admin = Address::generate(&env);
-    let token_id = setup_token(&env, &token_admin, &owner, 0);
-
+    let token_id = Address::generate(&env);
     client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
 
     let snapshot = client.export_snapshot(&owner).unwrap();
